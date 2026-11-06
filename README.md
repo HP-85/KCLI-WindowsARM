@@ -21,8 +21,10 @@ Each binary is replaced in-place. No backup is kept — Kiro will restore the or
 ## Requirements
 
 - Windows on ARM (ARM64)
-- PowerShell 7+ (`pwsh`)
+- PowerShell 5.1+ (built into Windows — no additional install needed)
 - Internet access (to download ARM64 builds)
+
+> **First run:** Kiro-CLI downloads its bundled tools (`node.exe`, `bun.exe`, `rg.exe`) on first launch, not at install time. Run Kiro-CLI at least once before running this script, otherwise the binaries won't exist yet.
 
 ## Usage
 
@@ -40,6 +42,9 @@ Each binary is replaced in-place. No backup is kept — Kiro will restore the or
 .\armify-kiro.ps1 -SkipRg
 .\armify-kiro.ps1 -SkipNode -SkipBun
 
+# Remove ARM64 binaries so Kiro-CLI re-downloads x64 originals on next launch
+.\armify-kiro.ps1 -Remove
+
 # Point to a custom Kiro-CLI directory
 .\armify-kiro.ps1 -KiroDir "D:\Tools\Kiro-Cli"
 ```
@@ -53,12 +58,13 @@ Each binary is replaced in-place. No backup is kept — Kiro will restore the or
 | `-SkipBun` | Skip replacing `bun.exe` |
 | `-SkipRg` | Skip replacing `rg.exe` |
 | `-Force` | Replace binaries even if they are already ARM64 |
+| `-Remove` | Delete the ARM64 binaries so Kiro-CLI re-downloads x64 originals on next launch |
 | `-WhatIf` | Dry run — show what would be replaced without doing it |
 
 ## How it works
 
 1. Locates the Kiro-CLI directory.
-2. For each binary, reads the PE header to check the current architecture.
+2. For each binary, reads the first 512 bytes of the PE header to check the current architecture.
 3. Runs the binary with `--version` to detect the exact installed version.
 4. Downloads the matching ARM64 release zip from the official source.
 5. Verifies the downloaded binary is actually ARM64 before replacing.

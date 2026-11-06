@@ -1,4 +1,4 @@
-#Requires -Version 7
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Replaces x64 binaries in Kiro-CLI with native ARM64 equivalents.
@@ -29,6 +29,10 @@
 .PARAMETER SkipRg
     Skip replacing rg.exe.
 
+.PARAMETER Remove
+    Delete the ARM64 binaries so Kiro-CLI will re-download its original x64
+    versions on next launch. Useful for reverting or troubleshooting.
+
 .PARAMETER Force
     Replace even if the binary is already ARM64.
 
@@ -43,6 +47,9 @@
 
 .EXAMPLE
     .\armify-kiro.ps1 -Force -SkipRg
+
+.EXAMPLE
+    .\armify-kiro.ps1 -Remove
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -51,11 +58,14 @@ param(
     [switch] $SkipNode,
     [switch] $SkipBun,
     [switch] $SkipRg,
-    [switch] $Force
+    [switch] $Force,
+    [switch] $Remove
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$ProgressPreference    = 'SilentlyContinue'
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -67,10 +77,15 @@ function Write-Fail  { param($msg) Write-Host "    [XX] $msg" -ForegroundColor R
 
 function Get-PEArch {
     param([string]$Path)
-    $bytes = [System.IO.File]::ReadAllBytes($Path)
-    if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { return "Not a PE" }
-    $peOffset    = [BitConverter]::ToInt32($bytes, 0x3C)
-    $machineType = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+    # Read only the first 512 bytes -- enough for the PE header
+    $fs   = [System.IO.File]::OpenRead($Path)
+    $buf  = New-Object byte[] 512
+    $read = $fs.Read($buf, 0, 512)
+    $fs.Close()
+    if ($read -lt 0x40 -or $buf[0] -ne 0x4D -or $buf[1] -ne 0x5A) { return "Not a PE" }
+    $peOffset    = [BitConverter]::ToInt32($buf, 0x3C)
+    if ($peOffset + 6 -gt $read) { return "PE header out of range" }
+    $machineType = [BitConverter]::ToUInt16($buf, $peOffset + 4)
     if     ($machineType -eq 0x8664) { return "x64" }
     elseif ($machineType -eq 0xAA64) { return "ARM64" }
     elseif ($machineType -eq 0x14C)  { return "x86" }
@@ -116,6 +131,36 @@ if (-not $WhatIfPreference) {
     New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
 }
 
+# ── Remove mode ───────────────────────────────────────────────────────────────
+
+if ($Remove) {
+    Write-Step "Removing ARM64 binaries (Kiro-CLI will re-download x64 on next launch)"
+
+    $toRemove = @()
+    if (-not $SkipNode) { $toRemove += Join-Path $KiroDir "node.exe" }
+    if (-not $SkipBun)  { $toRemove += Join-Path $KiroDir "bun.exe" }
+    if (-not $SkipRg) {
+        $rgInstances = Get-ChildItem (Join-Path $KiroDir "kas") -Recurse -Filter "rg.exe" -ErrorAction SilentlyContinue
+        if ($rgInstances) { $toRemove += $rgInstances.FullName }
+    }
+
+    foreach ($f in $toRemove) {
+        if (Test-Path $f) {
+            if ($PSCmdlet.ShouldProcess($f, "Delete")) {
+                Remove-Item $f -Force
+                Write-Ok "Deleted $f"
+            }
+        } else {
+            Write-Skip "Not found, skipping: $f"
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Done. Launch Kiro-CLI to restore the original x64 binaries." -ForegroundColor Green
+    Write-Host ""
+    exit 0
+}
+
 # ── node.exe ──────────────────────────────────────────────────────────────────
 
 if (-not $SkipNode) {
@@ -123,7 +168,8 @@ if (-not $SkipNode) {
     $nodePath = Join-Path $KiroDir "node.exe"
 
     if (-not (Test-Path $nodePath)) {
-        Write-Warn "node.exe not found at $nodePath — skipping"
+        Write-Warn "node.exe not found at $nodePath"
+        Write-Warn "Run Kiro-CLI once first, then re-run this script"
     } else {
         $currentArch = Get-PEArch $nodePath
         Write-Host "    Current arch : $currentArch"
@@ -145,7 +191,9 @@ if (-not $SkipNode) {
                 Download-File $url $zipPath
 
                 if (Test-Path $exDir) { Remove-Item $exDir -Recurse -Force }
-                Expand-Archive $zipPath $exDir -Force
+                Write-Host "    Expanding $(Split-Path $zipPath -Leaf) ..." -NoNewline
+                [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $exDir)
+                Write-Host " done"
 
                 $arm64Exe = Get-ChildItem $exDir -Recurse -Filter "node.exe" |
                             Select-Object -First 1
@@ -175,7 +223,8 @@ if (-not $SkipBun) {
     $bunPath = Join-Path $KiroDir "bun.exe"
 
     if (-not (Test-Path $bunPath)) {
-        Write-Warn "bun.exe not found at $bunPath — skipping"
+        Write-Warn "bun.exe not found at $bunPath"
+        Write-Warn "Run Kiro-CLI once first, then re-run this script"
     } else {
         $currentArch = Get-PEArch $bunPath
         Write-Host "    Current arch : $currentArch"
@@ -197,7 +246,9 @@ if (-not $SkipBun) {
                 Download-File $url $zipPath
 
                 if (Test-Path $exDir) { Remove-Item $exDir -Recurse -Force }
-                Expand-Archive $zipPath $exDir -Force
+                Write-Host "    Expanding $(Split-Path $zipPath -Leaf) ..." -NoNewline
+                [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $exDir)
+                Write-Host " done"
 
                 $arm64Exe = Get-ChildItem $exDir -Recurse -Filter "bun.exe" |
                             Select-Object -First 1
@@ -229,7 +280,8 @@ if (-not $SkipRg) {
     $rgInstances = Get-ChildItem (Join-Path $KiroDir "kas") -Recurse -Filter "rg.exe" -ErrorAction SilentlyContinue
 
     if (-not $rgInstances) {
-        Write-Warn "rg.exe not found under $KiroDir\kas — skipping"
+        Write-Warn "rg.exe not found under $KiroDir\kas"
+        Write-Warn "Run Kiro-CLI once first, then re-run this script"
     } else {
         foreach ($rg in $rgInstances) {
             $rgPath      = $rg.FullName
@@ -266,7 +318,9 @@ if (-not $SkipRg) {
             Download-File $url $zipPath
 
             if (Test-Path $exDir) { Remove-Item $exDir -Recurse -Force }
-            Expand-Archive $zipPath $exDir -Force
+            Write-Host "    Expanding $(Split-Path $zipPath -Leaf) ..." -NoNewline
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $exDir)
+            Write-Host " done"
 
             $arm64Exe = Get-ChildItem $exDir -Recurse -Filter "rg.exe" |
                         Select-Object -First 1
